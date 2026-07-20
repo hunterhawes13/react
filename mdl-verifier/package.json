@@ -1,0 +1,30 @@
+{
+  "name": "aamva-mdl-verifier",
+  "version": "0.1.0",
+  "description": "AAMVA/ISO 18013-5 mobile driver's license (mDL) verification tool: decodes mdoc CBOR responses, validates issuer digest integrity and validity periods, and reports on issuer signature/trust-chain status.",
+  "private": true,
+  "license": "MIT",
+  "bin": {
+    "mdl-verify": "dist/src/cli.js"
+  },
+  "main": "dist/src/index.js",
+  "types": "dist/src/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/src/cli.js",
+    "dev": "ts-node src/cli.ts",
+    "test": "node dist/test/run.js",
+    "make-fixture": "node dist/test/makeFixture.js",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "cbor": "^9.0.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.43",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
