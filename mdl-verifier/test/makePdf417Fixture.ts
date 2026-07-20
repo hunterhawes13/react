@@ -78,6 +78,44 @@ export function buildMalformedBarcodeFixture(): string {
   return 'this is not an AAMVA barcode payload at all';
 }
 
+/**
+ * Reproduces a real-world failure mode: barcode text that's been reformatted or copy-pasted
+ * (blank lines, indentation, a stray space right after an element ID) so the header's declared
+ * subfile offset/length no longer line up with the actual data, even though the field content
+ * itself is intact. The parser is expected to fall back to locating the subfile by its marker
+ * instead of trusting those numbers — see the "declared offset/length didn't match" warning in
+ * pdf417.ts. Deliberately includes a field after where the (wrong) declared length would have
+ * cut the subfile off, to prove the fallback doesn't truncate.
+ */
+export function buildReformattedBarcodeFixture(now: Date): string {
+  const birthDate = new Date(Date.UTC(now.getUTCFullYear() - 25, 4, 14));
+  const expiryDate = new Date(Date.UTC(now.getUTCFullYear() + 2, 0, 10));
+
+  const marker = 'ANSI ';
+  const iin = '999999';
+  const aamvaVersion = '09';
+  const jurisdictionVersion = '00';
+  const numberOfEntries = '01';
+  const headerDigits = iin + aamvaVersion + jurisdictionVersion + numberOfEntries;
+  // A plausible-looking but wrong declared offset/length: correct for some real byte-level
+  // encoding, not for this plain-text reconstruction — exactly the mismatch being tested.
+  const designator = 'DL00310248';
+
+  return [
+    '@',
+    '',
+    marker + headerDigits + designator,
+    '',
+    '                               DLDAQ B656551288783',
+    '',
+    'DCSSAMPLE',
+    'DACJANE',
+    `DBA${mmddccyy(expiryDate)}`,
+    `DBB${mmddccyy(birthDate)}`,
+    'DDAF', // beyond where the wrong declared length (248) would have truncated a short fixture
+  ].join('\n');
+}
+
 function main(): void {
   const outDir = path.join(__dirname, 'fixtures');
   fs.mkdirSync(outDir, { recursive: true });

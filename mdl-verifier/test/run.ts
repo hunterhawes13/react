@@ -8,7 +8,7 @@ import { looksLikeAamvaBarcode } from '../src/pdf417';
 import { buildBarcodeReport } from '../src/pdf417Report';
 import { buildReport } from '../src/report';
 import { buildFixture } from './makeFixture';
-import { buildBarcodeFixture, buildMalformedBarcodeFixture } from './makePdf417Fixture';
+import { buildBarcodeFixture, buildMalformedBarcodeFixture, buildReformattedBarcodeFixture } from './makePdf417Fixture';
 
 let failures = 0;
 
@@ -119,6 +119,29 @@ function main(): void {
     const report = buildBarcodeReport(buildBarcodeFixture(now, { expired: true }), now);
     const doc = report.documents[0];
     check('expiration found and expired', doc?.expiration.found === true && doc?.expiration.expired === true);
+  }
+
+  console.log('pdf417 reformatted/offset-mismatched input');
+  {
+    const text = buildReformattedBarcodeFixture(now);
+    const report = buildBarcodeReport(text, now);
+    check('no top-level errors', report.errors.length === 0, JSON.stringify(report.errors));
+    check('one document decoded', report.documents.length === 1);
+    const doc = report.documents[0];
+    check('all 6 elements decoded despite bad offsets', doc?.elements.length === 6, String(doc?.elements.length));
+    const daq = doc?.elements.find((e) => e.id === 'DAQ');
+    check('DAQ recovered without leading-space artifact', daq?.value === 'B656551288783', String(daq?.value));
+    const trailing = doc?.elements.find((e) => e.id === 'DDA');
+    check(
+      'field beyond the wrong declared length is not truncated away',
+      trailing?.value === 'F',
+      String(trailing?.value)
+    );
+    check(
+      'a fallback warning is reported',
+      report.warnings.some((w) => w.includes("didn't match")),
+      JSON.stringify(report.warnings)
+    );
   }
 
   console.log('pdf417 malformed input');

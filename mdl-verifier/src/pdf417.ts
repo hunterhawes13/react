@@ -85,9 +85,11 @@ export function parseAamvaBarcode(input: string | Buffer | Uint8Array): AamvaBar
   }
 
   const documents: AamvaBarcodeDocument[] = [];
-  for (const designator of subfileDesignators) {
+  for (let i = 0; i < subfileDesignators.length; i++) {
+    const designator = subfileDesignators[i];
+    const nextDesignator = subfileDesignators[i + 1];
     try {
-      documents.push(parseSubfile(raw, designator, warnings));
+      documents.push(parseSubfile(raw, designator, cursor, nextDesignator, warnings));
     } catch (err) {
       warnings.push(`Subfile "${designator.subfileType}": ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -104,23 +106,44 @@ function takeDigits(raw: string, start: number, count: number, fieldName: string
   return chunk;
 }
 
-function parseSubfile(raw: string, designator: AamvaSubfileDesignator, warnings: string[]): AamvaBarcodeDocument {
+function parseSubfile(
+  raw: string,
+  designator: AamvaSubfileDesignator,
+  designatorsEnd: number,
+  nextDesignator: AamvaSubfileDesignator | undefined,
+  warnings: string[]
+): AamvaBarcodeDocument {
   const end = designator.offset + designator.length;
-  if (designator.offset < 0 || end > raw.length) {
-    warnings.push(
-      `Subfile "${designator.subfileType}" offset/length (${designator.offset}/${designator.length}) exceeds ` +
-        `input length (${raw.length}); reading what's available.`
-    );
-  }
-  const slice = raw.slice(designator.offset, Math.min(end, raw.length));
+  const primarySlice = raw.slice(Math.max(designator.offset, 0), Math.min(end, raw.length));
 
-  let body = slice;
-  if (slice.slice(0, 2) === designator.subfileType) {
-    body = slice.slice(2);
+  let body: string;
+  if (primarySlice.slice(0, 2) === designator.subfileType) {
+    body = primarySlice.slice(2);
   } else {
-    warnings.push(
-      `Subfile "${designator.subfileType}" data does not begin with its own subfile-type marker; parsing anyway.`
-    );
+    // The declared offset/length didn't land on the subfile's own marker. This happens when
+    // barcode text has been reformatted or copy-pasted (extra blank lines, indentation, etc.)
+    // so character offsets no longer match the original byte layout, even though the field
+    // content itself is intact. Fall back to locating the marker by search instead of trusting
+    // the numbers — and read to the next subfile's marker (or end of input) rather than the
+    // declared length, since that's equally unreliable once offsets are off.
+    const searchFrom = Math.max(designatorsEnd, 0);
+    const markerIndex = raw.indexOf(designator.subfileType, searchFrom);
+    const searchEnd = nextDesignator ? raw.indexOf(nextDesignator.subfileType, markerIndex + 2) : -1;
+
+    if (markerIndex === -1) {
+      warnings.push(
+        `Subfile "${designator.subfileType}" data does not begin with its own subfile-type marker at its ` +
+          'declared offset, and no marker could be found elsewhere; parsing the declared-offset slice anyway ' +
+          '(results may be incomplete or misaligned).'
+      );
+      body = primarySlice;
+    } else {
+      warnings.push(
+        `Subfile "${designator.subfileType}" declared offset/length didn't match its actual data ` +
+          '(likely reformatted/copy-pasted input); located it by searching instead.'
+      );
+      body = raw.slice(markerIndex + 2, searchEnd !== -1 ? searchEnd : raw.length);
+    }
   }
 
   const lines = body
@@ -135,7 +158,9 @@ function parseSubfile(raw: string, designator: AamvaSubfileDesignator, warnings:
       continue;
     }
     const id = line.slice(0, 3);
-    const rawValue = line.slice(3);
+    // A space immediately after the 3-letter ID (before any real value content) is never part
+    // of genuine AAMVA data — it only shows up when barcode text has been manually reformatted.
+    const rawValue = line.slice(3).replace(/^ +/, '');
     elements.push({ id, label: labelForBarcodeElement(id), rawValue, value: decodeElementValue(id, rawValue) });
   }
 
@@ -159,6 +184,14 @@ function decodeElementValue(id: string, rawValue: string): unknown {
  * can guess wrong, so treat parsed dates as a best effort.
  */
 export function parseAamvaDate(raw: string): Date | undefined {
+  // Strictly speaking this isn't valid AAMVA barcode data (dates are always 8 bare digits,
+  // never hyphenated) but ISO-formatted dates show up often enough in reformatted/re-typed
+  // barcode dumps that it's worth accepting rather than falling back to an unparsed string.
+  const isoMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
+  if (isoMatch) {
+    return tryDate(Number(isoMatch[1]), Number(isoMatch[2]), Number(isoMatch[3]));
+  }
+
   if (!/^\d{8}$/.test(raw)) return undefined;
 
   const mmddccyy = tryDate(Number(raw.slice(4, 8)), Number(raw.slice(0, 2)), Number(raw.slice(2, 4)));
