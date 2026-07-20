@@ -19,11 +19,15 @@ import {
 
 export class Pdf417ParseError extends Error {}
 
-const HEADER_MARKER = 'ANSI ';
+// The literal marker is "ANSI " (with a trailing space), but that trailing space is exactly the
+// kind of byte that gets silently eaten by copy/paste, terminal word-wrap, or manual retyping —
+// it's cosmetic, not data. Accept any single whitespace character after "ANSI" instead of
+// requiring the literal space.
+const HEADER_MARKER_RE = /ANSI\s/;
 
 /** Heuristic used by the CLI to decide whether input looks like an AAMVA barcode payload rather than mdoc CBOR. */
 export function looksLikeAamvaBarcode(text: string): boolean {
-  return text.includes(HEADER_MARKER) || text.trimStart().startsWith('@');
+  return HEADER_MARKER_RE.test(text) || text.trimStart().startsWith('@');
 }
 
 export function decodeBarcodeInput(input: string | Buffer | Uint8Array): string {
@@ -35,24 +39,40 @@ export function parseAamvaBarcode(input: string | Buffer | Uint8Array): AamvaBar
   const raw = decodeBarcodeInput(input);
   const warnings: string[] = [];
 
-  const markerIndex = raw.indexOf(HEADER_MARKER);
-  if (markerIndex === -1) {
+  const markerMatch = HEADER_MARKER_RE.exec(raw);
+  if (!markerMatch) {
     throw new Pdf417ParseError(
-      `Could not find the AAMVA header marker "${HEADER_MARKER}" in the input; this doesn't look like a ` +
-        'decoded AAMVA DL/ID barcode payload.'
+      'Could not find the AAMVA header marker "ANSI" in the input; this doesn\'t look like a decoded ' +
+        'AAMVA DL/ID barcode payload.'
     );
   }
 
-  let cursor = markerIndex + HEADER_MARKER.length;
+  let cursor = markerMatch.index + markerMatch[0].length;
+  // Floor for the marker-search fallback in parseSubfile: the header itself is pure digits (no
+  // letters), so it's always safe to search for a subfile marker starting here — unlike using
+  // the cursor position *after* designator parsing, which can overshoot past the real body when
+  // a corrupted "number of entries" causes bogus designator bytes to be consumed.
+  const headerDigitsStart = cursor;
   const iin = takeDigits(raw, cursor, 6, 'Issuer Identification Number');
   cursor += 6;
   const aamvaVersionNumber = Number(takeDigits(raw, cursor, 2, 'AAMVA Version Number'));
   cursor += 2;
 
+  // Per spec, only the very first AAMVA version ("01") omits the jurisdiction version field;
+  // every other version includes it. Versions are only ever 01+, so an out-of-range value here
+  // (0, or implausibly large) is itself a sign the data is corrupted — but since the overwhelming
+  // majority of real-world barcodes are version >=2 with the field present, that's the safer
+  // structural assumption to fall back on rather than treating an invalid version as "no field."
   let jurisdictionVersionNumber: number | undefined;
-  if (aamvaVersionNumber >= 2) {
+  if (aamvaVersionNumber !== 1) {
     jurisdictionVersionNumber = Number(takeDigits(raw, cursor, 2, 'Jurisdiction Version Number'));
     cursor += 2;
+  }
+  if (aamvaVersionNumber < 1 || aamvaVersionNumber > 20) {
+    warnings.push(
+      `AAMVA Version Number "${String(aamvaVersionNumber).padStart(2, '0')}" is outside the range of ` +
+        'versions AAMVA has ever issued (01-1x); the header is likely corrupted or altered.'
+    );
   }
 
   const numberOfEntries = Number(takeDigits(raw, cursor, 2, 'Number of Entries'));
@@ -84,12 +104,21 @@ export function parseAamvaBarcode(input: string | Buffer | Uint8Array): AamvaBar
     cursor += 10;
   }
 
+  if (subfileDesignators.length !== numberOfEntries) {
+    warnings.push(
+      `Header declares ${numberOfEntries} subfile entr${numberOfEntries === 1 ? 'y' : 'ies'}, but only ` +
+        `${subfileDesignators.length} valid subfile designator(s) were found. This is an internally ` +
+        'inconsistent header — either the data is corrupted/altered, or (more likely for hand-transcribed ' +
+        'input) a digit in "number of entries" was mistyped.'
+    );
+  }
+
   const documents: AamvaBarcodeDocument[] = [];
   for (let i = 0; i < subfileDesignators.length; i++) {
     const designator = subfileDesignators[i];
     const nextDesignator = subfileDesignators[i + 1];
     try {
-      documents.push(parseSubfile(raw, designator, cursor, nextDesignator, warnings));
+      documents.push(parseSubfile(raw, designator, headerDigitsStart, nextDesignator, warnings));
     } catch (err) {
       warnings.push(`Subfile "${designator.subfileType}": ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -106,10 +135,30 @@ function takeDigits(raw: string, start: number, count: number, fieldName: string
   return chunk;
 }
 
+/**
+ * Finds the next genuine occurrence of `subfileType` (e.g. "DL") at or after `searchFrom`. A
+ * plain substring search is not safe here: a two-letter subfile type can easily occur mid-word
+ * inside an unrelated field value (e.g. "DL" inside the name "LYNN" in "DADLYNN"). But requiring
+ * it to be preceded by a newline is *too* strict — in properly encoded (non-reformatted) data the
+ * marker sits directly adjacent to the designator's own digits with no separator at all (e.g.
+ * "...00310248DLDAQ..."). The distinguishing signal is what's immediately before the candidate:
+ * a genuine marker is preceded by a digit, whitespace/newline, or start-of-string — never by
+ * another letter, which is what happens mid-word. Combined with requiring an uppercase letter
+ * right after (the start of a genuine 3-letter element ID), that rules out false positives like
+ * "DADLYNN" while still matching both adjacent and reformatted/indented real occurrences.
+ */
+function findSubfileMarker(raw: string, subfileType: string, searchFrom: number): number {
+  const escaped = subfileType.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(`(?<![A-Za-z])(${escaped})(?=[A-Z])`, 'g');
+  re.lastIndex = Math.max(searchFrom, 0);
+  const match = re.exec(raw);
+  return match ? match.index : -1;
+}
+
 function parseSubfile(
   raw: string,
   designator: AamvaSubfileDesignator,
-  designatorsEnd: number,
+  searchFloor: number,
   nextDesignator: AamvaSubfileDesignator | undefined,
   warnings: string[]
 ): AamvaBarcodeDocument {
@@ -126,9 +175,12 @@ function parseSubfile(
     // content itself is intact. Fall back to locating the marker by search instead of trusting
     // the numbers — and read to the next subfile's marker (or end of input) rather than the
     // declared length, since that's equally unreliable once offsets are off.
-    const searchFrom = Math.max(designatorsEnd, 0);
-    const markerIndex = raw.indexOf(designator.subfileType, searchFrom);
-    const searchEnd = nextDesignator ? raw.indexOf(nextDesignator.subfileType, markerIndex + 2) : -1;
+    const searchFrom = Math.max(searchFloor, 0);
+    const markerIndex = findSubfileMarker(raw, designator.subfileType, searchFrom);
+    const searchEnd =
+      nextDesignator && markerIndex !== -1
+        ? findSubfileMarker(raw, nextDesignator.subfileType, markerIndex + 2)
+        : -1;
 
     if (markerIndex === -1) {
       warnings.push(

@@ -69,6 +69,13 @@ export function buildBarcodeReport(
 
   const documents = (barcode?.documents ?? []).map((doc) => buildDocumentReport(doc, now));
 
+  if (barcode && documents.length === 0) {
+    errors.push(
+      'No subfile documents were decoded. The header parsed, but no valid subfile designator pointed at ' +
+        'readable data — check the parse warnings below for why.'
+    );
+  }
+
   return {
     format: 'pdf417',
     header: barcode?.header,

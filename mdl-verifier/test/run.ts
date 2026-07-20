@@ -8,7 +8,12 @@ import { looksLikeAamvaBarcode } from '../src/pdf417';
 import { buildBarcodeReport } from '../src/pdf417Report';
 import { buildReport } from '../src/report';
 import { buildFixture } from './makeFixture';
-import { buildBarcodeFixture, buildMalformedBarcodeFixture, buildReformattedBarcodeFixture } from './makePdf417Fixture';
+import {
+  buildBarcodeFixture,
+  buildCorruptedHeaderBarcodeFixture,
+  buildMalformedBarcodeFixture,
+  buildReformattedBarcodeFixture,
+} from './makePdf417Fixture';
 
 let failures = 0;
 
@@ -140,6 +145,36 @@ function main(): void {
     check(
       'a fallback warning is reported',
       report.warnings.some((w) => w.includes("didn't match")),
+      JSON.stringify(report.warnings)
+    );
+  }
+
+  console.log('pdf417 corrupted header (invalid version + miscounted entries + name containing "DL")');
+  {
+    const text = buildCorruptedHeaderBarcodeFixture(now);
+    const report = buildBarcodeReport(text, now);
+    check('no top-level errors', report.errors.length === 0, JSON.stringify(report.errors));
+    check('one document decoded', report.documents.length === 1);
+    const doc = report.documents[0];
+    check('all 7 elements decoded', doc?.elements.length === 7, String(doc?.elements.length));
+    const daq = doc?.elements.find((e) => e.id === 'DAQ');
+    check('DAQ recovered correctly', daq?.value === 'B656551288783', String(daq?.value));
+    const dad = doc?.elements.find((e) => e.id === 'DAD');
+    check(
+      'DAD ("LYNN", containing "DL" mid-word) is not mistaken for the subfile marker',
+      dad?.value === 'LYNN',
+      String(dad?.value)
+    );
+    const trailing = doc?.elements.find((e) => e.id === 'DDA');
+    check('trailing field survives the entries-count overshoot', trailing?.value === 'F', String(trailing?.value));
+    check(
+      'invalid version number warning present',
+      report.warnings.some((w) => w.includes('outside the range of')),
+      JSON.stringify(report.warnings)
+    );
+    check(
+      'entries-count mismatch warning present',
+      report.warnings.some((w) => w.includes('subfile entr')),
       JSON.stringify(report.warnings)
     );
   }

@@ -116,6 +116,45 @@ export function buildReformattedBarcodeFixture(now: Date): string {
   ].join('\n');
 }
 
+/**
+ * Reproduces a second real-world failure mode found alongside the one above: an invalid AAMVA
+ * version number ("00" — real versions start at 01) combined with a "number of entries" that
+ * doesn't match the actual subfile count. Together these make the parser's cursor overshoot past
+ * the real subfile body when locating it by declared offset, requiring the marker-search
+ * fallback — which itself must not be fooled by "DL" occurring mid-word inside a name value
+ * (here, "LYNN" via the DAD/middle-name element, i.e. "DADLYNN").
+ */
+export function buildCorruptedHeaderBarcodeFixture(now: Date): string {
+  const birthDate = new Date(Date.UTC(now.getUTCFullYear() - 25, 4, 14));
+  const expiryDate = new Date(Date.UTC(now.getUTCFullYear() + 2, 0, 10));
+
+  const elements: FixtureElement[] = [
+    { id: 'DAQ', value: 'B656551288783' },
+    { id: 'DCS', value: 'SAMPLE' },
+    { id: 'DAC', value: 'JANE' },
+    { id: 'DAD', value: 'LYNN' }, // "DADLYNN" contains "DL" mid-word: the false-positive case
+    { id: 'DBA', value: mmddccyy(expiryDate) },
+    { id: 'DBB', value: mmddccyy(birthDate) },
+    { id: 'DDA', value: 'F' }, // trailing field: proves the entries-count overshoot doesn't drop it
+  ];
+
+  const marker = 'ANSI ';
+  const iin = '999999';
+  const aamvaVersion = '00'; // invalid (real versions are 01+), as if corrupted/mistyped
+  const jurisdictionVersion = '00';
+  const numberOfEntries = '02'; // wrong: only one subfile designator is actually present below
+  const headerDigits = iin + aamvaVersion + jurisdictionVersion + numberOfEntries;
+
+  const body = 'DL' + elements.map((e) => `${e.id}${e.value}`).join('\n');
+  const trueOffset = marker.length + headerDigits.length + 10;
+  // Wrong on purpose, same as buildReformattedBarcodeFixture: correct for some real byte-level
+  // encoding, not for this plain-text reconstruction.
+  const declaredOffset = trueOffset + 4;
+  const designator = 'DL' + pad(declaredOffset, 4) + pad(body.length, 4);
+
+  return marker + headerDigits + designator + body;
+}
+
 function main(): void {
   const outDir = path.join(__dirname, 'fixtures');
   fs.mkdirSync(outDir, { recursive: true });
@@ -124,6 +163,8 @@ function main(): void {
   fs.writeFileSync(path.join(outDir, 'valid.pdf417.txt'), buildBarcodeFixture(now));
   fs.writeFileSync(path.join(outDir, 'expired.pdf417.txt'), buildBarcodeFixture(now, { expired: true }));
   fs.writeFileSync(path.join(outDir, 'malformed.pdf417.txt'), buildMalformedBarcodeFixture());
+  fs.writeFileSync(path.join(outDir, 'reformatted.pdf417.txt'), buildReformattedBarcodeFixture(now));
+  fs.writeFileSync(path.join(outDir, 'corrupted-header.pdf417.txt'), buildCorruptedHeaderBarcodeFixture(now));
 
   console.log(`Wrote PDF417 fixtures to ${outDir}`);
 }
