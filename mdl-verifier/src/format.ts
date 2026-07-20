@@ -1,3 +1,4 @@
+import { BarcodeVerificationReport } from './pdf417Report';
 import { VerificationReport } from './report';
 
 export function formatText(report: VerificationReport): string {
@@ -69,4 +70,60 @@ function jsonReplacer(_key: string, value: unknown): unknown {
   if (value instanceof Uint8Array) return `<${value.length} bytes>`;
   if (value instanceof Date) return value.toISOString();
   return value;
+}
+
+export function formatBarcodeText(report: BarcodeVerificationReport): string {
+  const lines: string[] = [];
+  lines.push('AAMVA DL/ID PDF417 Barcode Report');
+  lines.push('='.repeat(60));
+  if (report.header) {
+    lines.push(
+      `Header: IIN ${report.header.issuerIdentificationNumber}, AAMVA version ${report.header.aamvaVersionNumber}` +
+        (report.header.jurisdictionVersionNumber !== undefined
+          ? `, jurisdiction version ${report.header.jurisdictionVersionNumber}`
+          : '') +
+        `, ${report.header.numberOfEntries} subfile(s)`
+    );
+  }
+  lines.push('NOTE: This format has no digital signature — see the notice under each document below.');
+
+  if (report.errors.length) {
+    lines.push('');
+    lines.push('ERRORS:');
+    for (const e of report.errors) lines.push(`  - ${e}`);
+  }
+  if (report.warnings.length) {
+    lines.push('');
+    lines.push('Parse warnings:');
+    for (const w of report.warnings) lines.push(`  - ${w}`);
+  }
+
+  for (const doc of report.documents) {
+    lines.push('');
+    lines.push(`Document (subfile "${doc.subfileType}")`);
+    lines.push('-'.repeat(60));
+    lines.push(`Overall status: ${doc.overallStatus}`);
+    if (doc.expiration.found) {
+      lines.push(`Expiration:  ${isoDate(doc.expiration.date!)} (${doc.expiration.expired ? 'EXPIRED' : 'not expired'})`);
+    }
+    if (doc.ageOver21.found) {
+      lines.push(`Age over 21: ${doc.ageOver21.over21 ? 'yes' : 'no'} (birth date ${isoDate(doc.ageOver21.birthDate!)})`);
+    }
+    lines.push('');
+    lines.push('Decoded data elements:');
+    for (const el of doc.elements) {
+      lines.push(`  [${el.integrityStatus.padEnd(13)}] ${el.id} ${el.label}: ${formatValue(el.value)}`);
+    }
+    if (doc.issues.length) {
+      lines.push('');
+      lines.push('Issues:');
+      for (const i of doc.issues) lines.push(`  - ${i}`);
+    }
+  }
+
+  return lines.join('\n');
+}
+
+export function formatBarcodeJson(report: BarcodeVerificationReport): string {
+  return JSON.stringify(report, jsonReplacer, 2);
 }

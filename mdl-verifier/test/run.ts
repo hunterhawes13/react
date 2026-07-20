@@ -4,8 +4,11 @@
  * pipeline produces the expected verdicts. Run: npm run build && npm test
  */
 import { decodeInputBytes } from '../src/mdoc';
+import { looksLikeAamvaBarcode } from '../src/pdf417';
+import { buildBarcodeReport } from '../src/pdf417Report';
 import { buildReport } from '../src/report';
 import { buildFixture } from './makeFixture';
+import { buildBarcodeFixture, buildMalformedBarcodeFixture } from './makePdf417Fixture';
 
 let failures = 0;
 
@@ -80,6 +83,51 @@ function main(): void {
   {
     const report = buildReport(Buffer.from('not cbor at all, just text'));
     check('reports a top-level error rather than throwing', report.errors.length > 0);
+  }
+
+  console.log('pdf417 valid fixture');
+  {
+    const text = buildBarcodeFixture(now);
+    check('looksLikeAamvaBarcode detects it', looksLikeAamvaBarcode(text));
+    const report = buildBarcodeReport(text, now);
+    check('no top-level errors', report.errors.length === 0, JSON.stringify(report.errors));
+    check('one document decoded', report.documents.length === 1);
+    const doc = report.documents[0];
+    check('overall status reflects no crypto assurance', doc?.overallStatus === 'DECODED_NO_CRYPTOGRAPHIC_ASSURANCE');
+    check('19 elements decoded', doc?.elements.length === 19, String(doc?.elements.length));
+    check(
+      'every element flagged UNVERIFIABLE',
+      doc?.elements.every((e) => e.integrityStatus === 'UNVERIFIABLE') ?? false
+    );
+    const familyName = doc?.elements.find((e) => e.id === 'DCS');
+    check('DCS (family name) decoded', familyName?.value === 'SAMPLE', String(familyName?.value));
+    check('expiration found and not expired', doc?.expiration.found === true && doc?.expiration.expired === false);
+    check('birth date parsed as a Date', doc?.ageOver21.birthDate instanceof Date);
+    check('age-over-21 computed true for a 30-year-old', doc?.ageOver21.over21 === true);
+    check(
+      'no-signature notice present in issues',
+      doc?.issues.some((i) => i.includes('NO digital signature')) ?? false
+    );
+
+    // Buffer input (as the CLI would read from a file) should parse identically.
+    const viaBuffer = buildBarcodeReport(Buffer.from(text, 'utf8'), now);
+    check('Buffer input parses identically', viaBuffer.documents[0]?.overallStatus === 'DECODED_NO_CRYPTOGRAPHIC_ASSURANCE');
+  }
+
+  console.log('pdf417 expired fixture');
+  {
+    const report = buildBarcodeReport(buildBarcodeFixture(now, { expired: true }), now);
+    const doc = report.documents[0];
+    check('expiration found and expired', doc?.expiration.found === true && doc?.expiration.expired === true);
+  }
+
+  console.log('pdf417 malformed input');
+  {
+    const text = buildMalformedBarcodeFixture();
+    check('looksLikeAamvaBarcode rejects it', !looksLikeAamvaBarcode(text));
+    const report = buildBarcodeReport(text, now);
+    check('reports a top-level error rather than throwing', report.errors.length > 0);
+    check('no documents decoded', report.documents.length === 0);
   }
 
   console.log('');

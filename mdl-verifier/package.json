@@ -14,7 +14,7 @@
     "start": "node dist/src/cli.js",
     "dev": "ts-node src/cli.ts",
     "test": "node dist/test/run.js",
-    "make-fixture": "node dist/test/makeFixture.js",
+    "make-fixture": "node dist/test/makeFixture.js && node dist/test/makePdf417Fixture.js",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
